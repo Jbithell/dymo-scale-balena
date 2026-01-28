@@ -1,0 +1,20 @@
+# Use a dynamic base image based on the device architecture (Pi Zero, Pi 3, Pi 4, etc)
+FROM balenalib/%%BALENA_MACHINE_NAME%%-python:3-run
+
+# Install system dependencies for USB and GPIO
+# libusb-1.0-0 is required for pyusb
+# gcc and python3-dev might be needed for compiling some pi-gpio libs
+RUN install_packages libusb-1.0-0-dev build-essential
+
+# Set working directory
+WORKDIR /usr/src/app
+
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
+COPY src/ ./src/
+
+# Run the script
+CMD ["python3", "src/main.py"]

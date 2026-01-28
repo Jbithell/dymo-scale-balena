@@ -1,0 +1,14 @@
+version: '2.1'
+volumes:
+  dymo-data:
+
+services:
+  scale-bridge:
+    build: ./scale-bridge
+    privileged: true
+    restart: always
+    network_mode: host
+    labels:
+      io.balena.features.kernel-modules: '1'
+      io.balena.features.sysfs: '1'
+      io.balena.features.procfs: '1'
