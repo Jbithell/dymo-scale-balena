@@ -22,7 +22,7 @@ VENDOR_ID = 0x0922
 # Watchdog: How long (seconds) to wait for data before marking "Offline"
 DATA_TIMEOUT = 5.0
 
-# Status Mapping for Dymo Scales
+# Mappings
 STATUS_MAP = {
     1: "Fault",
     2: "Zeroing",
@@ -47,7 +47,6 @@ running = True
 active_buttons = []
 GPIO_AVAILABLE = False
 
-# Try imports
 try:
     from gpiozero import Button
     GPIO_AVAILABLE = True
@@ -62,61 +61,7 @@ def signal_handler(sig, frame):
     print("Stopping...")
     running = False
 
-def connect_mqtt():
-    # Create unique ID based on Balena UUID
-    client_id = f"dymo_{os.getenv('BALENA_DEVICE_UUID', 'local')[:7]}"
-    client = mqtt.Client(client_id=client_id)
-    
-    if MQTT_USER:
-        client.username_pw_set(MQTT_USER, MQTT_PASS)
-    
-    # Last Will: If script dies, mark Bridge as offline
-    client.will_set(TOPIC_BRIDGE_STATUS, "offline", retain=True)
-    
-    try:
-        client.connect(MQTT_BROKER, MQTT_PORT, 60)
-        client.loop_start()
-        print(f"Connected to MQTT Broker at {MQTT_BROKER}")
-        return client
-    except Exception as e:
-        print(f"Failed to connect to MQTT: {e}")
-        return None
-
-def setup_scale():
-    global device, endpoint
-    try:
-        device = usb.core.find(idVendor=VENDOR_ID)
-    except Exception:
-        device = None
-
-    if device is None:
-        return False
-
-    print(f"Scale found: {device.idVendor:04x}:{device.idProduct:04x}")
-
-    if device.is_kernel_driver_active(0):
-        try:
-            device.detach_kernel_driver(0)
-        except usb.core.USBError:
-            pass
-
-    try:
-        device.set_configuration()
-    except usb.core.USBError:
-        pass
-
-    cfg = device.get_active_configuration()
-    intf = cfg[(0,0)]
-
-    endpoint = usb.util.find_descriptor(
-        intf,
-        custom_match=lambda e: \
-            usb.util.endpoint_direction(e.bEndpointAddress) == \
-            usb.util.ENDPOINT_IN
-    )
-    
-    return True if endpoint else False
-
+# --- DISCOVERY LOGIC (Moved up for Callback Access) ---
 def publish_discovery(client):
     uuid = os.getenv('BALENA_DEVICE_UUID', 'local')
     device_info = {
@@ -124,7 +69,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "1.3"
+        "sw_version": "1.4"
     }
 
     # 1. Bridge Status
@@ -140,7 +85,7 @@ def publish_discovery(client):
     }
     client.publish(topic_bridge, json.dumps(payload_bridge), retain=True)
 
-    # 2. Scale Entity
+    # 2. Scale Weight
     topic_scale = "homeassistant/sensor/dymo_scale/config"
     payload_scale = {
         "name": "Shipping Scale",
@@ -175,7 +120,7 @@ def publish_discovery(client):
     }
     client.publish(topic_unit, json.dumps(payload_unit), retain=True)
 
-    # 4. Scale Status Text (NEW)
+    # 4. Scale Status Text
     topic_status = "homeassistant/sensor/dymo_scale/status_text/config"
     payload_status = {
         "name": "Shipping Scale Status",
@@ -208,6 +153,70 @@ def publish_discovery(client):
                 "device": device_info
             }
             client.publish(topic_btn, json.dumps(payload_btn), retain=True)
+            
+    print("Discovery Config Published")
+
+# --- MQTT CONNECTION ---
+
+def on_connect(client, userdata, flags, rc):
+    print(f"Connected to MQTT Broker (RC: {rc})")
+    # Mark Bridge as Online immediately upon connection
+    client.publish(TOPIC_BRIDGE_STATUS, "online", retain=True)
+    # Re-send discovery config to ensure HA sees us even if HA restarted
+    publish_discovery(client)
+
+def connect_mqtt():
+    client_id = f"dymo_{os.getenv('BALENA_DEVICE_UUID', 'local')[:7]}"
+    client = mqtt.Client(client_id=client_id)
+    if MQTT_USER:
+        client.username_pw_set(MQTT_USER, MQTT_PASS)
+    
+    # Last Will
+    client.will_set(TOPIC_BRIDGE_STATUS, "offline", retain=True)
+    
+    # Attach Callback
+    client.on_connect = on_connect
+    
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_start()
+        return client
+    except Exception as e:
+        print(f"Failed to connect to MQTT: {e}")
+        return None
+
+def setup_scale():
+    global device, endpoint
+    try:
+        device = usb.core.find(idVendor=VENDOR_ID)
+    except Exception:
+        device = None
+
+    if device is None: return False
+
+    print(f"Scale found: {device.idVendor:04x}:{device.idProduct:04x}")
+
+    if device.is_kernel_driver_active(0):
+        try:
+            device.detach_kernel_driver(0)
+        except usb.core.USBError:
+            pass
+
+    try:
+        device.set_configuration()
+    except usb.core.USBError:
+        pass
+
+    cfg = device.get_active_configuration()
+    intf = cfg[(0,0)]
+
+    endpoint = usb.util.find_descriptor(
+        intf,
+        custom_match=lambda e: \
+            usb.util.endpoint_direction(e.bEndpointAddress) == \
+            usb.util.ENDPOINT_IN
+    )
+    return True if endpoint else False
 
 # GPIO Callbacks
 def on_button_press(btn):
@@ -225,8 +234,7 @@ def on_button_release(btn):
     if mqtt_client: mqtt_client.publish(topic, "OFF", retain=False)
 
 def setup_buttons():
-    if not GPIO_AVAILABLE or not ENABLE_BUTTONS:
-        return
+    if not GPIO_AVAILABLE or not ENABLE_BUTTONS: return
     global active_buttons
     print("Initializing buttons...")
     for pin in BUTTON_MAP:
@@ -246,17 +254,11 @@ def main():
     
     print("Starting Dymo Balena Bridge...")
     mqtt_client = connect_mqtt()
-    if not mqtt_client:
-        print("MQTT Connection failed. Exiting to restart container.")
-        sys.exit(1)
+    if not mqtt_client: sys.exit(1)
         
-    # Mark Bridge as Online
-    mqtt_client.publish(TOPIC_BRIDGE_STATUS, "online", retain=True)
+    # NOTE: Discovery and Bridge Status are now handled in on_connect
     
-    # Mark Scale as Offline initially
     mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
-
-    publish_discovery(mqtt_client)
     setup_buttons()
 
     last_weight = -1
@@ -272,7 +274,6 @@ def main():
                 print("Scale USB Found (Waiting for data...)")
                 last_packet_time = time.time() # Grace period on connect
             else:
-                # If we were previously online, mark as offline now
                 if scale_online:
                      print("Scale Disconnected")
                      mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
@@ -283,9 +284,7 @@ def main():
                 time.sleep(5)
                 continue
 
-        # 2. Read Data
         try:
-            # Dymo M25 sends 8 byte chunks usually, M10 sends 6. Requesting 8 is safe.
             data = device.read(endpoint.bEndpointAddress, 8, timeout=1000)
             
             # Check if we actually received data bytes
@@ -333,7 +332,6 @@ def main():
                         zero_motion_start = 0
 
                     # --- ONLINE CHECK ---
-                    # Only mark online if we passed the Soft Off check
                     if not scale_online:
                         print("Scale Active - Status: Online")
                         mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
@@ -367,14 +365,11 @@ def main():
                 print(f"USB Error: {e}")
                 device = None
 
-        # Watchdog: Check for silence
-        # If we haven't seen a valid packet in DATA_TIMEOUT seconds, mark as offline
+        # Watchdog
         if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
             print(f"No data for {DATA_TIMEOUT}s - Status: Offline")
             mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
             scale_online = False
-            
-            # Reset last values so that when it wakes up, any value is considered "New"
             last_weight = -1
             last_status = -1
             last_unit = -1
@@ -382,7 +377,6 @@ def main():
 
         time.sleep(0.1)
 
-    # Cleanup
     if mqtt_client:
         mqtt_client.publish(TOPIC_BRIDGE_STATUS, "offline", retain=True)
         mqtt_client.loop_stop()
