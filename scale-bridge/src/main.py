@@ -124,7 +124,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "1.2"
+        "sw_version": "1.3"
     }
 
     # 1. Bridge Status
@@ -175,7 +175,24 @@ def publish_discovery(client):
     }
     client.publish(topic_unit, json.dumps(payload_unit), retain=True)
 
-    # 4. Buttons
+    # 4. Scale Status Text (NEW)
+    topic_status = "homeassistant/sensor/dymo_scale/status_text/config"
+    payload_status = {
+        "name": "Shipping Scale Status",
+        "state_topic": "dymo/scale/weight",
+        "availability": [
+            {"topic": TOPIC_BRIDGE_STATUS},
+            {"topic": TOPIC_SCALE_STATUS}
+        ],
+        "availability_mode": "all",
+        "icon": "mdi:information-outline",
+        "unique_id": f"dymo_status_{uuid}",
+        "device": device_info,
+        "value_template": "{{ value_json.status }}"
+    }
+    client.publish(topic_status, json.dumps(payload_status), retain=True)
+
+    # 5. Buttons
     if GPIO_AVAILABLE and ENABLE_BUTTONS:
         for pin, name in BUTTON_MAP.items():
             safe_id = name.lower().replace(" ", "_")
@@ -247,6 +264,7 @@ def main():
     last_unit = -1
     scale_online = False
     last_packet_time = 0
+    zero_motion_start = 0
 
     while running:
         if device is None:
@@ -274,11 +292,6 @@ def main():
             if len(data) > 0:
                 last_packet_time = time.time()
                 
-                if not scale_online:
-                    print("Scale Active - Status: Online")
-                    mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
-                    scale_online = True
-
                 if len(data) >= 6:
                     offset = 0
                     if data[2] in [2, 11, 12]: offset = 0
@@ -299,6 +312,33 @@ def main():
                     weight = round(weight, 1)
 
                     if status == 5: weight = -abs(weight)
+                    
+                    # --- SOFT OFF DETECTION ---
+                    # Dymo scales often report 0g "In Motion" (Status 3) repeatedly when soft-off/sleeping
+                    if weight == 0 and status == 3:
+                        if zero_motion_start == 0:
+                            zero_motion_start = time.time()
+                        
+                        if time.time() - zero_motion_start > DATA_TIMEOUT:
+                            # We have been 0g In Motion for too long -> Consider this "Offline"
+                            if scale_online:
+                                print(f"Scale Soft Off (0g In Motion > {DATA_TIMEOUT}s) - Status: Offline")
+                                mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
+                                scale_online = False
+                                last_weight = -1
+                                last_status = -1
+                                last_unit = -1
+                            continue # Skip processing this packet
+                    else:
+                        zero_motion_start = 0
+
+                    # --- ONLINE CHECK ---
+                    # Only mark online if we passed the Soft Off check
+                    if not scale_online:
+                        print("Scale Active - Status: Online")
+                        mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
+                        scale_online = True
+
                     status_text = STATUS_MAP.get(status, f"Unknown ({status})")
                     unit_text = UNIT_MAP.get(unit_code, "unknown")
 
@@ -338,6 +378,7 @@ def main():
             last_weight = -1
             last_status = -1
             last_unit = -1
+            zero_motion_start = 0
 
         time.sleep(0.1)
 
