@@ -69,7 +69,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "1.5"
+        "sw_version": "1.6"
     }
 
     # 1. Bridge Status
@@ -86,7 +86,8 @@ def publish_discovery(client):
     client.publish(topic_bridge, json.dumps(payload_bridge), retain=True)
 
     # 2. Scale Weight
-    topic_scale = "homeassistant/sensor/dymo_scale/config"
+    # UPDATED TOPIC to be more specific to ensure fresh discovery
+    topic_scale = "homeassistant/sensor/dymo_scale/weight/config"
     payload_scale = {
         "name": "Shipping Scale",
         "state_topic": "dymo/scale/weight",
@@ -121,7 +122,7 @@ def publish_discovery(client):
     client.publish(topic_unit, json.dumps(payload_unit), retain=True)
 
     # 4. Scale Status Text
-    # REMOVED TOPIC_SCALE_STATUS from availability so it shows "Offline" text instead of Unavailable
+    # Ensure a unique config topic structure
     topic_status = "homeassistant/sensor/dymo_scale/status_text/config"
     payload_status = {
         "name": "Shipping Scale Status",
@@ -154,7 +155,7 @@ def publish_discovery(client):
             }
             client.publish(topic_btn, json.dumps(payload_btn), retain=True)
             
-    print("Discovery Config Published")
+    print("Discovery Config Published (v1.6)")
 
 # --- MQTT CONNECTION ---
 
