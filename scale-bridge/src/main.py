@@ -61,7 +61,7 @@ def signal_handler(sig, frame):
     print("Stopping...")
     running = False
 
-# --- DISCOVERY LOGIC (Moved up for Callback Access) ---
+# --- DISCOVERY LOGIC ---
 def publish_discovery(client):
     uuid = os.getenv('BALENA_DEVICE_UUID', 'local')
     device_info = {
@@ -69,11 +69,11 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "1.6"
+        "sw_version": "2.0"
     }
 
     # 1. Bridge Status
-    topic_bridge = "homeassistant/binary_sensor/dymo_scale/bridge/config"
+    topic_bridge = f"homeassistant/binary_sensor/dymo_bridge_{uuid}/config"
     payload_bridge = {
         "name": "Dymo Bridge Status",
         "state_topic": TOPIC_BRIDGE_STATUS,
@@ -84,10 +84,10 @@ def publish_discovery(client):
         "device": device_info
     }
     client.publish(topic_bridge, json.dumps(payload_bridge), retain=True)
+    time.sleep(0.1)
 
     # 2. Scale Weight
-    # UPDATED TOPIC to be more specific to ensure fresh discovery
-    topic_scale = "homeassistant/sensor/dymo_scale/weight/config"
+    topic_scale = f"homeassistant/sensor/dymo_weight_{uuid}/config"
     payload_scale = {
         "name": "Shipping Scale",
         "state_topic": "dymo/scale/weight",
@@ -97,6 +97,7 @@ def publish_discovery(client):
         ],
         "availability_mode": "all",
         "unit_of_measurement": "g",
+        "state_class": "measurement",  # Enables long-term statistics
         "icon": "mdi:scale-balance",
         "unique_id": f"dymo_scale_{uuid}",
         "device": device_info,
@@ -104,11 +105,12 @@ def publish_discovery(client):
         "json_attributes_topic": "dymo/scale/weight"
     }
     client.publish(topic_scale, json.dumps(payload_scale), retain=True)
+    time.sleep(0.1)
 
-    # 3. Scale Display Unit
-    topic_unit = "homeassistant/sensor/dymo_scale/display_unit/config"
+    # 3. Scale Display Unit (Forced New Entity)
+    topic_unit = f"homeassistant/sensor/dymo_unit_text_{uuid}/config"
     payload_unit = {
-        "name": "Shipping Scale Unit",
+        "name": "Unit",
         "state_topic": "dymo/scale/unit",
         "availability": [
             {"topic": TOPIC_BRIDGE_STATUS},
@@ -116,33 +118,34 @@ def publish_discovery(client):
         ],
         "availability_mode": "all",
         "icon": "mdi:ruler-square",
-        "unique_id": f"dymo_unit_{uuid}",
+        "unique_id": f"dymo_unit_text_{uuid}",
         "device": device_info
     }
     client.publish(topic_unit, json.dumps(payload_unit), retain=True)
+    time.sleep(0.1)
 
-    # 4. Scale Status Text
-    # Ensure a unique config topic structure
-    topic_status = "homeassistant/sensor/dymo_scale/status_text/config"
+    # 4. Scale Status Text (Forced New Entity)
+    topic_status = f"homeassistant/sensor/dymo_status_text_{uuid}/config"
     payload_status = {
-        "name": "Shipping Scale Status",
+        "name": "Status",
         "state_topic": "dymo/scale/weight",
         "availability": [
             {"topic": TOPIC_BRIDGE_STATUS}
         ],
         "availability_mode": "all",
         "icon": "mdi:information-outline",
-        "unique_id": f"dymo_status_{uuid}",
+        "unique_id": f"dymo_status_text_{uuid}",
         "device": device_info,
         "value_template": "{{ value_json.status }}"
     }
     client.publish(topic_status, json.dumps(payload_status), retain=True)
+    time.sleep(0.1)
 
     # 5. Buttons
     if GPIO_AVAILABLE and ENABLE_BUTTONS:
         for pin, name in BUTTON_MAP.items():
             safe_id = name.lower().replace(" ", "_")
-            topic_btn = f"homeassistant/binary_sensor/dymo_scale/{safe_id}/config"
+            topic_btn = f"homeassistant/binary_sensor/dymo_btn_{safe_id}_{uuid}/config"
             payload_btn = {
                 "name": f"Dymo {name}",
                 "state_topic": f"dymo/scale/button/{safe_id}",
@@ -154,17 +157,25 @@ def publish_discovery(client):
                 "device": device_info
             }
             client.publish(topic_btn, json.dumps(payload_btn), retain=True)
+            time.sleep(0.1)
             
-    print("Discovery Config Published (v1.6)")
+    print("Discovery Config Published (v2.0)")
 
 # --- MQTT CONNECTION ---
 
 def on_connect(client, userdata, flags, rc):
     print(f"Connected to MQTT Broker (RC: {rc})")
-    # Mark Bridge as Online immediately upon connection
     client.publish(TOPIC_BRIDGE_STATUS, "online", retain=True)
-    # Re-send discovery config to ensure HA sees us even if HA restarted
+    # Listen for HA restarts
+    client.subscribe("homeassistant/status")
     publish_discovery(client)
+
+def on_message(client, userdata, msg):
+    if msg.topic == "homeassistant/status":
+        payload = msg.payload.decode()
+        if payload == "online":
+            print("Home Assistant Online - Resending Discovery")
+            publish_discovery(client)
 
 def connect_mqtt():
     client_id = f"dymo_{os.getenv('BALENA_DEVICE_UUID', 'local')[:7]}"
@@ -175,8 +186,8 @@ def connect_mqtt():
     # Last Will
     client.will_set(TOPIC_BRIDGE_STATUS, "offline", retain=True)
     
-    # Attach Callback
     client.on_connect = on_connect
+    client.on_message = on_message
     
     try:
         client.connect(MQTT_BROKER, MQTT_PORT, 60)
@@ -257,8 +268,6 @@ def main():
     mqtt_client = connect_mqtt()
     if not mqtt_client: sys.exit(1)
         
-    # NOTE: Discovery and Bridge Status are now handled in on_connect
-    
     # Init Offline State
     mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
     payload = {"weight": 0, "status": "Offline"}
@@ -277,7 +286,7 @@ def main():
         if device is None:
             if setup_scale():
                 print("Scale USB Found (Waiting for data...)")
-                last_packet_time = time.time() # Grace period on connect
+                last_packet_time = time.time() # Grace period
             else:
                 if scale_online:
                      print("Scale Disconnected")
@@ -294,7 +303,6 @@ def main():
         try:
             data = device.read(endpoint.bEndpointAddress, 8, timeout=1000)
             
-            # Check if we actually received data bytes
             if len(data) > 0:
                 last_packet_time = time.time()
                 
@@ -311,7 +319,6 @@ def main():
                     raw_val = data[offset+4] + (data[offset+5] << 8)
                     weight = raw_val * (10 ** scaling)
                     
-                    # Convert to Grams for the main sensor
                     if unit_code in [11, 12]: 
                         weight = weight * 28.3495
                     
@@ -320,13 +327,11 @@ def main():
                     if status == 5: weight = -abs(weight)
                     
                     # --- SOFT OFF DETECTION ---
-                    # Dymo scales often report 0g "In Motion" (Status 3) repeatedly when soft-off/sleeping
                     if weight == 0 and status == 3:
                         if zero_motion_start == 0:
                             zero_motion_start = time.time()
                         
                         if time.time() - zero_motion_start > DATA_TIMEOUT:
-                            # We have been 0g In Motion for too long -> Consider this "Offline"
                             if scale_online:
                                 print(f"Scale Soft Off (0g In Motion > {DATA_TIMEOUT}s) - Status: Offline")
                                 payload = {"weight": 0, "status": "Offline"}
@@ -336,11 +341,10 @@ def main():
                                 last_weight = -1
                                 last_status = -1
                                 last_unit = -1
-                            continue # Skip processing this packet
+                            continue 
                     else:
                         zero_motion_start = 0
 
-                    # --- ONLINE CHECK ---
                     if not scale_online:
                         print("Scale Active - Status: Online")
                         mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
@@ -349,7 +353,6 @@ def main():
                     status_text = STATUS_MAP.get(status, f"Unknown ({status})")
                     unit_text = UNIT_MAP.get(unit_code, "unknown")
 
-                    # Publish Weight/Status changes
                     if weight != last_weight or status != last_status:
                         print(f"Weight: {weight}g (Status: {status_text})")
                         payload = {"weight": weight, "status": status_text}
@@ -357,7 +360,6 @@ def main():
                         last_weight = weight
                         last_status = status
 
-                    # Publish Unit changes
                     if unit_code != last_unit:
                         print(f"Display Unit Changed: {unit_text}")
                         mqtt_client.publish("dymo/scale/unit", unit_text, retain=True)
@@ -365,7 +367,6 @@ def main():
             
         except usb.core.USBError as e:
             if e.errno == 110: 
-                # Timeout is normal (no data sent)
                 pass
             elif e.errno == 19:
                 print("Device disconnected (Error 19)")
@@ -374,7 +375,6 @@ def main():
                 print(f"USB Error: {e}")
                 device = None
 
-        # Watchdog
         if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
             print(f"No data for {DATA_TIMEOUT}s - Status: Offline")
             payload = {"weight": 0, "status": "Offline"}
