@@ -14,11 +14,13 @@ MQTT_USER = os.getenv('MQTT_USER', None)
 MQTT_PASS = os.getenv('MQTT_PASS', None)
 
 # GPIO Configuration
-# Set 'ENABLE_BUTTONS' to 'true' in Balena Device Variables to use
 ENABLE_BUTTONS = os.getenv('ENABLE_BUTTONS', 'false').lower() == 'true'
 BUTTON_MAP = {17: "Button 1", 27: "Button 2"}
 BUTTON_DEBOUNCE = 0.05
 VENDOR_ID = 0x0922
+
+# Watchdog: How long (seconds) to wait for data before marking "Offline"
+DATA_TIMEOUT = 5.0
 
 # Status Mapping for Dymo Scales
 STATUS_MAP = {
@@ -220,15 +222,16 @@ def main():
     last_weight = -1
     last_status = -1
     scale_online = False
+    last_packet_time = 0
 
     while running:
-        # 1. Device Connection
+        # 1. Device Connection Logic
         if device is None:
             if setup_scale():
-                print("Scale Connected")
-                mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
-                scale_online = True
+                print("Scale USB Interface Found (Waiting for data...)")
+                # We do NOT mark it online yet, we wait for data
             else:
+                # If we were previously online, mark as offline now
                 if scale_online:
                      print("Scale Disconnected")
                      mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
@@ -241,6 +244,15 @@ def main():
             # Dymo M25 sends 8 byte chunks usually, M10 sends 6. Requesting 8 is safe.
             data = device.read(endpoint.bEndpointAddress, 8, timeout=1000)
             
+            # === PACKET RECEIVED ===
+            last_packet_time = time.time()
+            
+            # If we were offline/sleeping, mark as Online now
+            if not scale_online:
+                print("Scale Active (Data Received) - Status: Online")
+                mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
+                scale_online = True
+
             if len(data) >= 6:
                 offset = 0
                 if data[2] in [2, 11, 12]: offset = 0
@@ -275,7 +287,14 @@ def main():
             
         except usb.core.USBError as e:
             if e.errno == 110: 
-                # Timeout is normal when scale is connected but idle/silent
+                # Timeout: Scale is connected via USB, but not sending data.
+                # It is likely in "Sleep" / "Soft Off" mode.
+                
+                if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
+                    print(f"No data for {DATA_TIMEOUT}s (Scale Asleep?) - Status: Offline")
+                    mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
+                    scale_online = False
+                
                 continue
             elif e.errno == 19:
                 print("Device disconnected (Error 19)")
