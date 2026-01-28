@@ -69,7 +69,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "2.1"
+        "sw_version": "2.2"
     }
 
     # 1. Bridge Status
@@ -159,7 +159,7 @@ def publish_discovery(client):
             client.publish(topic_btn, json.dumps(payload_btn), retain=True)
             time.sleep(0.1)
             
-    print("Discovery Config Published (v2.1)")
+    print("Discovery Config Published (v2.2)")
 
 # --- MQTT CONNECTION ---
 
@@ -319,8 +319,12 @@ def main():
                     raw_val = data[offset+4] + (data[offset+5] << 8)
                     weight = raw_val * (10 ** scaling)
                     
-                    if unit_code in [11, 12]: 
+                    # Normalization Logic
+                    # We normalize everything to Grams for consistency in Home Assistant
+                    if unit_code == 11: # Ounces
                         weight = weight * 28.3495
+                    elif unit_code == 12: # Pounds
+                        weight = weight * 453.592
                     
                     weight = round(weight, 1)
 
