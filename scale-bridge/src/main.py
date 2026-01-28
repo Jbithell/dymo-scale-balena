@@ -7,24 +7,16 @@ import sys
 import signal
 import os
 
-# --- BALENA CONFIGURATION (Via Environment Variables) ---
+# --- CONFIGURATION ---
 MQTT_BROKER = os.getenv('MQTT_BROKER', 'homeassistant.local')
 MQTT_PORT = int(os.getenv('MQTT_PORT', 1883))
 MQTT_USER = os.getenv('MQTT_USER', None)
 MQTT_PASS = os.getenv('MQTT_PASS', None)
 
-DEFAULT_BUTTONS = {17: "Button 1", 27: "Button 2"}
-button_env = os.getenv('BUTTON_MAP')
-if button_env:
-    try:
-        loaded_map = json.loads(button_env)
-        BUTTON_MAP = {int(k): v for k, v in loaded_map.items()}
-    except Exception as e:
-        print(f"Error parsing BUTTON_MAP env var: {e}")
-        BUTTON_MAP = DEFAULT_BUTTONS
-else:
-    BUTTON_MAP = DEFAULT_BUTTONS
-
+# GPIO Configuration
+# Set 'ENABLE_BUTTONS' to 'true' in Balena Device Variables to use
+ENABLE_BUTTONS = os.getenv('ENABLE_BUTTONS', 'false').lower() == 'true'
+BUTTON_MAP = {17: "Button 1", 27: "Button 2"}
 BUTTON_DEBOUNCE = 0.05
 VENDOR_ID = 0x0922
 
@@ -36,11 +28,12 @@ running = True
 active_buttons = []
 GPIO_AVAILABLE = False
 
+# Try imports
 try:
     from gpiozero import Button
     GPIO_AVAILABLE = True
 except ImportError:
-    print("GPIO Zero not found")
+    print("GPIO Zero library not found. Buttons disabled.")
 
 TOPIC_BRIDGE_STATUS = "dymo/bridge/status"
 TOPIC_SCALE_STATUS = "dymo/scale/status"
@@ -51,10 +44,14 @@ def signal_handler(sig, frame):
     running = False
 
 def connect_mqtt():
-    client = mqtt.Client(client_id=f"dymo_balena_{os.getenv('BALENA_DEVICE_UUID', 'local')[:7]}")
+    # Create unique ID based on Balena UUID
+    client_id = f"dymo_{os.getenv('BALENA_DEVICE_UUID', 'local')[:7]}"
+    client = mqtt.Client(client_id=client_id)
+    
     if MQTT_USER:
         client.username_pw_set(MQTT_USER, MQTT_PASS)
     
+    # Last Will: If script dies, mark Bridge as offline
     client.will_set(TOPIC_BRIDGE_STATUS, "offline", retain=True)
     
     try:
@@ -76,9 +73,8 @@ def setup_scale():
     if device is None:
         return False
 
-    print(f"Scale found: {device}")
+    print(f"Scale found: {device.idVendor:04x}:{device.idProduct:04x}")
 
-    # Standard Linux cleanup
     if device.is_kernel_driver_active(0):
         try:
             device.detach_kernel_driver(0)
@@ -99,11 +95,13 @@ def setup_scale():
             usb.util.endpoint_direction(e.bEndpointAddress) == \
             usb.util.ENDPOINT_IN
     )
+    
     return True if endpoint else False
 
 def publish_discovery(client):
+    uuid = os.getenv('BALENA_DEVICE_UUID', 'local')
     device_info = {
-        "identifiers": [f"dymo_balena_{os.getenv('BALENA_DEVICE_UUID', 'local')}"],
+        "identifiers": [f"dymo_balena_{uuid}"],
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
@@ -115,7 +113,7 @@ def publish_discovery(client):
     payload_bridge = {
         "name": "Dymo Bridge Status",
         "state_topic": TOPIC_BRIDGE_STATUS,
-        "unique_id": f"dymo_bridge_{os.getenv('BALENA_DEVICE_UUID', 'local')}",
+        "unique_id": f"dymo_bridge_{uuid}",
         "device_class": "connectivity",
         "payload_on": "online",
         "payload_off": "offline",
@@ -135,22 +133,22 @@ def publish_discovery(client):
         "availability_mode": "all",
         "unit_of_measurement": "g",
         "icon": "mdi:scale-balance",
-        "unique_id": f"dymo_scale_{os.getenv('BALENA_DEVICE_UUID', 'local')}",
+        "unique_id": f"dymo_scale_{uuid}",
         "device": device_info,
         "value_template": "{{ value_json.weight }}",
         "json_attributes_topic": "dymo/scale/weight"
     }
     client.publish(topic_scale, json.dumps(payload_scale), retain=True)
 
-    # 3. Buttons
-    if GPIO_AVAILABLE:
+    # 3. Buttons (Only if enabled)
+    if GPIO_AVAILABLE and ENABLE_BUTTONS:
         for pin, name in BUTTON_MAP.items():
             safe_id = name.lower().replace(" ", "_")
             topic_btn = f"homeassistant/binary_sensor/dymo_scale/{safe_id}/config"
             payload_btn = {
                 "name": f"Dymo {name}",
                 "state_topic": f"dymo/scale/button/{safe_id}",
-                "unique_id": f"dymo_btn_{pin}_{os.getenv('BALENA_DEVICE_UUID', 'local')}",
+                "unique_id": f"dymo_btn_{pin}_{uuid}",
                 "availability_topic": TOPIC_BRIDGE_STATUS,
                 "device_class": "connectivity", 
                 "payload_on": "ON",
@@ -159,6 +157,7 @@ def publish_discovery(client):
             }
             client.publish(topic_btn, json.dumps(payload_btn), retain=True)
 
+# GPIO Callbacks
 def on_button_press(btn):
     pin = btn.pin.number
     name = BUTTON_MAP.get(pin, f"Button {pin}")
@@ -174,17 +173,18 @@ def on_button_release(btn):
     if mqtt_client: mqtt_client.publish(topic, "OFF", retain=False)
 
 def setup_buttons():
-    if not GPIO_AVAILABLE: return
+    if not GPIO_AVAILABLE or not ENABLE_BUTTONS:
+        return
     global active_buttons
+    print("Initializing buttons...")
     for pin in BUTTON_MAP:
         try:
             btn = Button(pin, pull_up=True, bounce_time=BUTTON_DEBOUNCE)
             btn.when_pressed = on_button_press
             btn.when_released = on_button_release
             active_buttons.append(btn)
-            print(f"GPIO {pin} configured")
         except Exception as e:
-            print(f"GPIO {pin} error: {e}")
+            print(f"Error setting up GPIO {pin}: {e}")
 
 def main():
     signal.signal(signal.SIGINT, signal_handler)
@@ -195,11 +195,15 @@ def main():
     print("Starting Dymo Balena Bridge...")
     mqtt_client = connect_mqtt()
     if not mqtt_client:
-        print("Could not connect to MQTT. Exiting to trigger container restart.")
+        print("MQTT Connection failed. Exiting to restart container.")
         sys.exit(1)
-
+        
+    # Mark Bridge as Online
     mqtt_client.publish(TOPIC_BRIDGE_STATUS, "online", retain=True)
+    
+    # Mark Scale as Offline initially
     mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
+
     publish_discovery(mqtt_client)
     setup_buttons()
 
@@ -208,30 +212,25 @@ def main():
     scale_online = False
 
     while running:
-        try:
-            if device is None:
-                if setup_scale():
-                    print("Scale Connected")
-                    mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
-                    scale_online = True
-                else:
-                    if scale_online:
-                         print("Scale Disconnected")
-                         mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
-                         scale_online = False
-                    time.sleep(5)
-                    continue
-
-            try:
-                data = device.read(endpoint.bEndpointAddress, endpoint.wMaxPacketSize, timeout=1000)
-            except usb.core.USBError as e:
-                if e.errno == 110: continue
-                if e.errno == 19:
-                    device = None
-                    continue
-                device = None
+        # 1. Device Connection
+        if device is None:
+            if setup_scale():
+                print("Scale Connected")
+                mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
+                scale_online = True
+            else:
+                if scale_online:
+                     print("Scale Disconnected")
+                     mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
+                     scale_online = False
+                time.sleep(5)
                 continue
 
+        # 2. Read Data
+        try:
+            # Dymo M25 sends 8 byte chunks usually, M10 sends 6. Requesting 8 is safe.
+            data = device.read(endpoint.bEndpointAddress, 8, timeout=1000)
+            
             if len(data) >= 6:
                 offset = 0
                 if data[2] in [2, 11, 12]: offset = 0
@@ -244,23 +243,36 @@ def main():
                 
                 raw_val = data[offset+4] + (data[offset+5] << 8)
                 weight = raw_val * (10 ** scaling)
-                if unit_type in [11, 12]: weight = weight * 28.3495
+                
+                if unit_type in [11, 12]: 
+                    weight = weight * 28.3495
+                
                 weight = round(weight, 1)
 
                 if weight != last_weight or status != last_status:
+                    print(f"Weight: {weight}g (Status: {status})")
                     payload = {"weight": weight, "status": "Stable" if status == 4 else "Unstable"}
                     mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
                     last_weight = weight
                     last_status = status
+            
+        except usb.core.USBError as e:
+            if e.errno == 110: 
+                # Timeout is normal when scale is connected but idle/silent
+                continue
+            elif e.errno == 19:
+                print("Device disconnected (Error 19)")
+                device = None
+            else:
+                print(f"USB Error: {e}")
+                device = None
 
-            time.sleep(0.1)
+        time.sleep(0.1)
 
-        except Exception as e:
-            print(f"Error: {e}")
-            time.sleep(1)
-
-    mqtt_client.publish(TOPIC_BRIDGE_STATUS, "offline", retain=True)
-    mqtt_client.loop_stop()
+    # Cleanup
+    if mqtt_client:
+        mqtt_client.publish(TOPIC_BRIDGE_STATUS, "offline", retain=True)
+        mqtt_client.loop_stop()
 
 if __name__ == "__main__":
     main()
