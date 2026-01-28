@@ -20,6 +20,16 @@ BUTTON_MAP = {17: "Button 1", 27: "Button 2"}
 BUTTON_DEBOUNCE = 0.05
 VENDOR_ID = 0x0922
 
+# Status Mapping for Dymo Scales
+STATUS_MAP = {
+    1: "Fault",
+    2: "Zeroing",
+    3: "In Motion",
+    4: "Stable",
+    5: "Under Zero",
+    6: "Overload"
+}
+
 # --- GLOBALS ---
 device = None
 endpoint = None
@@ -249,9 +259,16 @@ def main():
                 
                 weight = round(weight, 1)
 
+                # Check for "Under Zero" status (5) and negate weight
+                if status == 5:
+                    weight = -abs(weight)
+
+                # Map status code to string description
+                status_text = STATUS_MAP.get(status, f"Unknown ({status})")
+
                 if weight != last_weight or status != last_status:
-                    print(f"Weight: {weight}g (Status: {status})")
-                    payload = {"weight": weight, "status": "Stable" if status == 4 else "Unstable"}
+                    print(f"Weight: {weight}g (Status: {status_text})")
+                    payload = {"weight": weight, "status": status_text}
                     mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
                     last_weight = weight
                     last_status = status
