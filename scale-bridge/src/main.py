@@ -32,6 +32,13 @@ STATUS_MAP = {
     6: "Overload"
 }
 
+UNIT_MAP = {
+    2: "g",
+    11: "oz",
+    12: "lb",
+    3: "kg"
+}
+
 # --- GLOBALS ---
 device = None
 endpoint = None
@@ -117,7 +124,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "1.0"
+        "sw_version": "1.2"
     }
 
     # 1. Bridge Status
@@ -152,7 +159,23 @@ def publish_discovery(client):
     }
     client.publish(topic_scale, json.dumps(payload_scale), retain=True)
 
-    # 3. Buttons (Only if enabled)
+    # 3. Scale Display Unit
+    topic_unit = "homeassistant/sensor/dymo_scale/display_unit/config"
+    payload_unit = {
+        "name": "Shipping Scale Unit",
+        "state_topic": "dymo/scale/unit",
+        "availability": [
+            {"topic": TOPIC_BRIDGE_STATUS},
+            {"topic": TOPIC_SCALE_STATUS}
+        ],
+        "availability_mode": "all",
+        "icon": "mdi:ruler-square",
+        "unique_id": f"dymo_unit_{uuid}",
+        "device": device_info
+    }
+    client.publish(topic_unit, json.dumps(payload_unit), retain=True)
+
+    # 4. Buttons
     if GPIO_AVAILABLE and ENABLE_BUTTONS:
         for pin, name in BUTTON_MAP.items():
             safe_id = name.lower().replace(" ", "_")
@@ -221,21 +244,24 @@ def main():
 
     last_weight = -1
     last_status = -1
+    last_unit = -1
     scale_online = False
     last_packet_time = 0
 
     while running:
-        # 1. Device Connection Logic
         if device is None:
             if setup_scale():
-                print("Scale USB Interface Found (Waiting for data...)")
-                # We do NOT mark it online yet, we wait for data
+                print("Scale USB Found (Waiting for data...)")
+                last_packet_time = time.time() # Grace period on connect
             else:
                 # If we were previously online, mark as offline now
                 if scale_online:
                      print("Scale Disconnected")
                      mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
                      scale_online = False
+                     last_weight = -1
+                     last_status = -1
+                     last_unit = -1
                 time.sleep(5)
                 continue
 
@@ -244,64 +270,74 @@ def main():
             # Dymo M25 sends 8 byte chunks usually, M10 sends 6. Requesting 8 is safe.
             data = device.read(endpoint.bEndpointAddress, 8, timeout=1000)
             
-            # === PACKET RECEIVED ===
-            last_packet_time = time.time()
-            
-            # If we were offline/sleeping, mark as Online now
-            if not scale_online:
-                print("Scale Active (Data Received) - Status: Online")
-                mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
-                scale_online = True
-
-            if len(data) >= 6:
-                offset = 0
-                if data[2] in [2, 11, 12]: offset = 0
-                elif data[1] in [2, 11, 12]: offset = -1
+            # Check if we actually received data bytes
+            if len(data) > 0:
+                last_packet_time = time.time()
                 
-                status = data[offset+1]
-                unit_type = data[offset+2]
-                scaling = data[offset+3]
-                if scaling > 127: scaling -= 256
-                
-                raw_val = data[offset+4] + (data[offset+5] << 8)
-                weight = raw_val * (10 ** scaling)
-                
-                if unit_type in [11, 12]: 
-                    weight = weight * 28.3495
-                
-                weight = round(weight, 1)
+                if not scale_online:
+                    print("Scale Active - Status: Online")
+                    mqtt_client.publish(TOPIC_SCALE_STATUS, "online", retain=True)
+                    scale_online = True
 
-                # Check for "Under Zero" status (5) and negate weight
-                if status == 5:
-                    weight = -abs(weight)
+                if len(data) >= 6:
+                    offset = 0
+                    if data[2] in [2, 11, 12]: offset = 0
+                    elif data[1] in [2, 11, 12]: offset = -1
+                    
+                    status = data[offset+1]
+                    unit_code = data[offset+2]
+                    scaling = data[offset+3]
+                    if scaling > 127: scaling -= 256
+                    
+                    raw_val = data[offset+4] + (data[offset+5] << 8)
+                    weight = raw_val * (10 ** scaling)
+                    
+                    # Convert to Grams for the main sensor
+                    if unit_code in [11, 12]: 
+                        weight = weight * 28.3495
+                    
+                    weight = round(weight, 1)
 
-                # Map status code to string description
-                status_text = STATUS_MAP.get(status, f"Unknown ({status})")
+                    if status == 5: weight = -abs(weight)
+                    status_text = STATUS_MAP.get(status, f"Unknown ({status})")
+                    unit_text = UNIT_MAP.get(unit_code, "unknown")
 
-                if weight != last_weight or status != last_status:
-                    print(f"Weight: {weight}g (Status: {status_text})")
-                    payload = {"weight": weight, "status": status_text}
-                    mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
-                    last_weight = weight
-                    last_status = status
+                    # Publish Weight/Status changes
+                    if weight != last_weight or status != last_status:
+                        print(f"Weight: {weight}g (Status: {status_text})")
+                        payload = {"weight": weight, "status": status_text}
+                        mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
+                        last_weight = weight
+                        last_status = status
+
+                    # Publish Unit changes
+                    if unit_code != last_unit:
+                        print(f"Display Unit Changed: {unit_text}")
+                        mqtt_client.publish("dymo/scale/unit", unit_text, retain=True)
+                        last_unit = unit_code
             
         except usb.core.USBError as e:
             if e.errno == 110: 
-                # Timeout: Scale is connected via USB, but not sending data.
-                # It is likely in "Sleep" / "Soft Off" mode.
-                
-                if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
-                    print(f"No data for {DATA_TIMEOUT}s (Scale Asleep?) - Status: Offline")
-                    mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
-                    scale_online = False
-                
-                continue
+                # Timeout is normal (no data sent)
+                pass
             elif e.errno == 19:
                 print("Device disconnected (Error 19)")
                 device = None
             else:
                 print(f"USB Error: {e}")
                 device = None
+
+        # Watchdog: Check for silence
+        # If we haven't seen a valid packet in DATA_TIMEOUT seconds, mark as offline
+        if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
+            print(f"No data for {DATA_TIMEOUT}s - Status: Offline")
+            mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
+            scale_online = False
+            
+            # Reset last values so that when it wakes up, any value is considered "New"
+            last_weight = -1
+            last_status = -1
+            last_unit = -1
 
         time.sleep(0.1)
 
