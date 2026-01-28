@@ -51,7 +51,7 @@ try:
     from gpiozero import Button
     GPIO_AVAILABLE = True
 except ImportError:
-    print("GPIO Zero library not found. Buttons disabled.")
+    pass
 
 TOPIC_BRIDGE_STATUS = "dymo/bridge/status"
 TOPIC_SCALE_STATUS = "dymo/scale/status"
@@ -69,7 +69,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "1.4"
+        "sw_version": "1.5"
     }
 
     # 1. Bridge Status
@@ -121,13 +121,13 @@ def publish_discovery(client):
     client.publish(topic_unit, json.dumps(payload_unit), retain=True)
 
     # 4. Scale Status Text
+    # REMOVED TOPIC_SCALE_STATUS from availability so it shows "Offline" text instead of Unavailable
     topic_status = "homeassistant/sensor/dymo_scale/status_text/config"
     payload_status = {
         "name": "Shipping Scale Status",
         "state_topic": "dymo/scale/weight",
         "availability": [
-            {"topic": TOPIC_BRIDGE_STATUS},
-            {"topic": TOPIC_SCALE_STATUS}
+            {"topic": TOPIC_BRIDGE_STATUS}
         ],
         "availability_mode": "all",
         "icon": "mdi:information-outline",
@@ -258,7 +258,11 @@ def main():
         
     # NOTE: Discovery and Bridge Status are now handled in on_connect
     
+    # Init Offline State
     mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
+    payload = {"weight": 0, "status": "Offline"}
+    mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
+
     setup_buttons()
 
     last_weight = -1
@@ -276,6 +280,8 @@ def main():
             else:
                 if scale_online:
                      print("Scale Disconnected")
+                     payload = {"weight": 0, "status": "Offline"}
+                     mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
                      mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
                      scale_online = False
                      last_weight = -1
@@ -322,6 +328,8 @@ def main():
                             # We have been 0g In Motion for too long -> Consider this "Offline"
                             if scale_online:
                                 print(f"Scale Soft Off (0g In Motion > {DATA_TIMEOUT}s) - Status: Offline")
+                                payload = {"weight": 0, "status": "Offline"}
+                                mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
                                 mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
                                 scale_online = False
                                 last_weight = -1
@@ -368,6 +376,8 @@ def main():
         # Watchdog
         if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
             print(f"No data for {DATA_TIMEOUT}s - Status: Offline")
+            payload = {"weight": 0, "status": "Offline"}
+            mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
             mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
             scale_online = False
             last_weight = -1
