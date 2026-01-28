@@ -69,7 +69,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "2.0"
+        "sw_version": "2.1"
     }
 
     # 1. Bridge Status
@@ -159,7 +159,7 @@ def publish_discovery(client):
             client.publish(topic_btn, json.dumps(payload_btn), retain=True)
             time.sleep(0.1)
             
-    print("Discovery Config Published (v2.0)")
+    print("Discovery Config Published (v2.1)")
 
 # --- MQTT CONNECTION ---
 
