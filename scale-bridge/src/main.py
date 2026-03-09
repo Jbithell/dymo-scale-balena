@@ -6,6 +6,7 @@ import json
 import sys
 import signal
 import os
+import glob as globmod
 
 # --- CONFIGURATION ---
 MQTT_BROKER = os.getenv('MQTT_BROKER', 'homeassistant.local')
@@ -55,6 +56,75 @@ except ImportError:
 
 TOPIC_BRIDGE_STATUS = "dymo/bridge/status"
 TOPIC_SCALE_STATUS = "dymo/scale/status"
+
+def disable_usb_autosuspend():
+    """Disable USB autosuspend globally to prevent kernel from sleeping USB devices."""
+    try:
+        with open('/sys/module/usbcore/parameters/autosuspend', 'w') as f:
+            f.write('-1')
+        print("USB autosuspend disabled globally")
+    except Exception as e:
+        print(f"Warning: Could not disable USB autosuspend: {e}")
+
+def disable_device_autosuspend(dev):
+    """Disable autosuspend for a specific USB device."""
+    try:
+        bus = dev.bus
+        addr = dev.address
+        # Find the sysfs path for this device
+        pattern = f'/sys/bus/usb/devices/*'
+        for path in globmod.glob(pattern):
+            try:
+                with open(f'{path}/busnum', 'r') as f:
+                    if int(f.read().strip()) != bus:
+                        continue
+                with open(f'{path}/devnum', 'r') as f:
+                    if int(f.read().strip()) != addr:
+                        continue
+                # Found the device, disable autosuspend
+                power_path = f'{path}/power/autosuspend'
+                if os.path.exists(power_path):
+                    with open(power_path, 'w') as f:
+                        f.write('-1')
+                control_path = f'{path}/power/control'
+                if os.path.exists(control_path):
+                    with open(control_path, 'w') as f:
+                        f.write('on')
+                print(f"Autosuspend disabled for device {bus}:{addr}")
+                return
+            except (ValueError, IOError):
+                continue
+    except Exception as e:
+        print(f"Warning: Could not disable device autosuspend: {e}")
+
+def reset_usb_device(dev):
+    """Attempt a USB device reset to recover from stuck state."""
+    try:
+        dev.reset()
+        print("USB device reset successful")
+        return True
+    except Exception as e:
+        print(f"USB device reset failed: {e}")
+    return False
+
+def reset_usb_bus():
+    """Reset USB bus controllers via sysfs as last resort."""
+    try:
+        controllers = globmod.glob('/sys/bus/usb/devices/usb*')
+        for ctrl in controllers:
+            auth_path = f'{ctrl}/authorized'
+            if os.path.exists(auth_path):
+                print(f"Resetting USB bus: {ctrl}")
+                with open(auth_path, 'w') as f:
+                    f.write('0')
+                time.sleep(1)
+                with open(auth_path, 'w') as f:
+                    f.write('1')
+        print("USB bus reset complete")
+        return True
+    except Exception as e:
+        print(f"USB bus reset failed: {e}")
+        return False
 
 def signal_handler(sig, frame):
     global running
@@ -208,6 +278,7 @@ def setup_scale():
     if device is None: return False
 
     print(f"Scale found: {device.idVendor:04x}:{device.idProduct:04x}")
+    disable_device_autosuspend(device)
 
     if device.is_kernel_driver_active(0):
         try:
@@ -266,6 +337,7 @@ def main():
     global mqtt_client, device
     
     print("Starting Dymo Balena Bridge...")
+    disable_usb_autosuspend()
     mqtt_client = connect_mqtt()
     if not mqtt_client: sys.exit(1)
         
@@ -393,7 +465,14 @@ def main():
                 print("Device disconnected (Error 19)")
                 device = None
             else:
-                print(f"USB Error: {e}")
+                print(f"USB Error (errno {e.errno}): {e}")
+                # Try to reset the device before giving up
+                if device is not None:
+                    reset_usb_device(device)
+                    try:
+                        usb.util.dispose_resources(device)
+                    except Exception:
+                        pass
                 device = None
 
         if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
@@ -406,12 +485,14 @@ def main():
             last_status = -1
             last_unit = -1
             zero_motion_start = 0
-            # Reset USB device so it can be re-initialized on next loop
-            try:
-                if device is not None:
+            # Try USB device reset first, then bus reset as last resort
+            if device is not None:
+                if not reset_usb_device(device):
+                    reset_usb_bus()
+                try:
                     usb.util.dispose_resources(device)
-            except Exception:
-                pass
+                except Exception:
+                    pass
             device = None
 
         time.sleep(0.1)
