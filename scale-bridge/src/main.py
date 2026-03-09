@@ -69,7 +69,7 @@ def publish_discovery(client):
         "name": "Dymo M2 Scale",
         "manufacturer": "Dymo",
         "model": "Balena Bridge",
-        "sw_version": "2.2"
+        "sw_version": "2.3"
     }
 
     # 1. Bridge Status
@@ -159,7 +159,7 @@ def publish_discovery(client):
             client.publish(topic_btn, json.dumps(payload_btn), retain=True)
             time.sleep(0.1)
             
-    print("Discovery Config Published (v2.2)")
+    print("Discovery Config Published (v2.3)")
 
 # --- MQTT CONNECTION ---
 
@@ -308,8 +308,8 @@ def main():
                 
                 if len(data) >= 6:
                     offset = 0
-                    if data[2] in [2, 11, 12]: offset = 0
-                    elif data[1] in [2, 11, 12]: offset = -1
+                    if data[2] in [2, 3, 11, 12]: offset = 0
+                    elif data[1] in [2, 3, 11, 12]: offset = -1
                     
                     status = data[offset+1]
                     unit_code = data[offset+2]
@@ -325,6 +325,8 @@ def main():
                         weight = weight * 28.3495
                     elif unit_code == 12: # Pounds
                         weight = weight * 453.592
+                    elif unit_code == 3: # Kilograms
+                        weight = weight * 1000
                     
                     weight = round(weight, 1)
 
@@ -345,7 +347,8 @@ def main():
                                 last_weight = -1
                                 last_status = -1
                                 last_unit = -1
-                            continue 
+                            time.sleep(0.1)
+                            continue
                     else:
                         zero_motion_start = 0
 
@@ -389,6 +392,13 @@ def main():
             last_status = -1
             last_unit = -1
             zero_motion_start = 0
+            # Reset USB device so it can be re-initialized on next loop
+            try:
+                if device is not None:
+                    usb.util.dispose_resources(device)
+            except Exception:
+                pass
+            device = None
 
         time.sleep(0.1)
 
