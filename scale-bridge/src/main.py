@@ -62,7 +62,6 @@ def disable_usb_autosuspend():
     try:
         with open('/sys/module/usbcore/parameters/autosuspend', 'w') as f:
             f.write('-1')
-        print("USB autosuspend disabled globally")
     except Exception as e:
         print(f"Warning: Could not disable USB autosuspend: {e}")
 
@@ -90,7 +89,6 @@ def disable_device_autosuspend(dev):
                 if os.path.exists(control_path):
                     with open(control_path, 'w') as f:
                         f.write('on')
-                print(f"Autosuspend disabled for device {bus}:{addr}")
                 return
             except (ValueError, IOError):
                 continue
@@ -101,10 +99,9 @@ def reset_usb_device(dev):
     """Attempt a USB device reset to recover from stuck state."""
     try:
         dev.reset()
-        print("USB device reset successful")
         return True
-    except Exception as e:
-        print(f"USB device reset failed: {e}")
+    except Exception:
+        pass
     return False
 
 def reset_usb_bus():
@@ -114,13 +111,13 @@ def reset_usb_bus():
         for ctrl in controllers:
             auth_path = f'{ctrl}/authorized'
             if os.path.exists(auth_path):
-                print(f"Resetting USB bus: {ctrl}")
                 with open(auth_path, 'w') as f:
                     f.write('0')
-                time.sleep(1)
+                time.sleep(0.5)
                 with open(auth_path, 'w') as f:
                     f.write('1')
-        print("USB bus reset complete")
+        time.sleep(0.5)
+        print("USB bus reset")
         return True
     except Exception as e:
         print(f"USB bus reset failed: {e}")
@@ -271,8 +268,7 @@ def setup_scale():
     global device, endpoint
     try:
         device = usb.core.find(idVendor=VENDOR_ID)
-    except Exception as e:
-        print(f"USB scan error: {e}")
+    except Exception:
         device = None
 
     if device is None: return False
@@ -283,13 +279,13 @@ def setup_scale():
     if device.is_kernel_driver_active(0):
         try:
             device.detach_kernel_driver(0)
-        except usb.core.USBError as e:
-            print(f"Warning: Could not detach kernel driver: {e}")
+        except usb.core.USBError:
+            pass
 
     try:
         device.set_configuration()
-    except usb.core.USBError as e:
-        print(f"Warning: Could not set configuration: {e}")
+    except usb.core.USBError:
+        pass
 
     cfg = device.get_active_configuration()
     intf = cfg[(0,0)]
@@ -359,8 +355,8 @@ def main():
     while running:
         if device is None:
             if setup_scale():
-                print(f"Scale USB Found (EP: 0x{endpoint.bEndpointAddress:02x}, MaxPkt: {endpoint.wMaxPacketSize}) - Waiting for data...")
-                last_packet_time = time.time() # Grace period
+                print(f"Scale USB Found (EP: 0x{endpoint.bEndpointAddress:02x})")
+                last_packet_time = time.time()
                 scan_count = 0
             else:
                 if scale_online:
@@ -373,11 +369,8 @@ def main():
                      last_status = -1
                      last_unit = -1
                 scan_count += 1
-                if scan_count == 1 or scan_count % 12 == 0:
-                    all_devs = list(usb.core.find(find_all=True))
-                    print(f"No Dymo scale found (scan #{scan_count}, {len(all_devs)} USB device(s) visible). Retrying...")
-                    for d in all_devs:
-                        print(f"  USB: {d.idVendor:04x}:{d.idProduct:04x}")
+                if scan_count == 1 or scan_count % 60 == 0:
+                    print(f"Waiting for scale to power on...")
                 time.sleep(5)
                 continue
 
@@ -386,9 +379,6 @@ def main():
 
             if len(data) > 0:
                 last_packet_time = time.time()
-
-                if not scale_online:
-                    print(f"Raw USB data ({len(data)} bytes): {list(data)}")
 
                 if len(data) >= 6:
                     offset = 0
@@ -458,15 +448,12 @@ def main():
             
         except usb.core.USBError as e:
             if e.errno == 110:
-                if not scale_online and scan_count == 0:
-                    print("USB read timeout (scale found but not sending data)")
-                    scan_count += 1
+                pass
             elif e.errno == 19:
                 print("Device disconnected (Error 19)")
                 device = None
             else:
-                print(f"USB Error (errno {e.errno}): {e}")
-                # Try to reset the device before giving up
+                print(f"USB Error: {e}")
                 if device is not None:
                     reset_usb_device(device)
                     try:
@@ -476,7 +463,7 @@ def main():
                 device = None
 
         if scale_online and (time.time() - last_packet_time > DATA_TIMEOUT):
-            print(f"No data for {DATA_TIMEOUT}s - Status: Offline")
+            print("Scale data timeout - Status: Offline")
             payload = {"weight": 0, "status": "Offline"}
             mqtt_client.publish("dymo/scale/weight", json.dumps(payload), retain=True)
             mqtt_client.publish(TOPIC_SCALE_STATUS, "offline", retain=True)
