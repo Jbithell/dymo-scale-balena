@@ -369,9 +369,9 @@ def main():
                      last_status = -1
                      last_unit = -1
                 scan_count += 1
-                if scan_count == 1 or scan_count % 60 == 0:
+                if scan_count == 1 or scan_count % 300 == 0:
                     print(f"Waiting for scale to power on...")
-                time.sleep(5)
+                time.sleep(1)
                 continue
 
         try:
