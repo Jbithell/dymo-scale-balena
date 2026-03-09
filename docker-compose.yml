@@ -8,6 +8,8 @@ services:
     privileged: true
     restart: always
     network_mode: host
+    environment:
+      - UDEV=1
     labels:
       io.balena.features.kernel-modules: '1'
       io.balena.features.sysfs: '1'
