@@ -201,7 +201,8 @@ def setup_scale():
     global device, endpoint
     try:
         device = usb.core.find(idVendor=VENDOR_ID)
-    except Exception:
+    except Exception as e:
+        print(f"USB scan error: {e}")
         device = None
 
     if device is None: return False
@@ -211,13 +212,13 @@ def setup_scale():
     if device.is_kernel_driver_active(0):
         try:
             device.detach_kernel_driver(0)
-        except usb.core.USBError:
-            pass
+        except usb.core.USBError as e:
+            print(f"Warning: Could not detach kernel driver: {e}")
 
     try:
         device.set_configuration()
-    except usb.core.USBError:
-        pass
+    except usb.core.USBError as e:
+        print(f"Warning: Could not set configuration: {e}")
 
     cfg = device.get_active_configuration()
     intf = cfg[(0,0)]
@@ -282,11 +283,13 @@ def main():
     last_packet_time = 0
     zero_motion_start = 0
 
+    scan_count = 0
     while running:
         if device is None:
             if setup_scale():
                 print("Scale USB Found (Waiting for data...)")
                 last_packet_time = time.time() # Grace period
+                scan_count = 0
             else:
                 if scale_online:
                      print("Scale Disconnected")
@@ -297,6 +300,12 @@ def main():
                      last_weight = -1
                      last_status = -1
                      last_unit = -1
+                scan_count += 1
+                if scan_count == 1 or scan_count % 12 == 0:
+                    all_devs = list(usb.core.find(find_all=True))
+                    print(f"No Dymo scale found (scan #{scan_count}, {len(all_devs)} USB device(s) visible). Retrying...")
+                    for d in all_devs:
+                        print(f"  USB: {d.idVendor:04x}:{d.idProduct:04x}")
                 time.sleep(5)
                 continue
 
