@@ -287,7 +287,7 @@ def main():
     while running:
         if device is None:
             if setup_scale():
-                print("Scale USB Found (Waiting for data...)")
+                print(f"Scale USB Found (EP: 0x{endpoint.bEndpointAddress:02x}, MaxPkt: {endpoint.wMaxPacketSize}) - Waiting for data...")
                 last_packet_time = time.time() # Grace period
                 scan_count = 0
             else:
@@ -311,10 +311,13 @@ def main():
 
         try:
             data = device.read(endpoint.bEndpointAddress, 8, timeout=1000)
-            
+
             if len(data) > 0:
                 last_packet_time = time.time()
-                
+
+                if not scale_online:
+                    print(f"Raw USB data ({len(data)} bytes): {list(data)}")
+
                 if len(data) >= 6:
                     offset = 0
                     if data[2] in [2, 3, 11, 12]: offset = 0
@@ -382,8 +385,10 @@ def main():
                         last_unit = unit_code
             
         except usb.core.USBError as e:
-            if e.errno == 110: 
-                pass
+            if e.errno == 110:
+                if not scale_online and scan_count == 0:
+                    print("USB read timeout (scale found but not sending data)")
+                    scan_count += 1
             elif e.errno == 19:
                 print("Device disconnected (Error 19)")
                 device = None
